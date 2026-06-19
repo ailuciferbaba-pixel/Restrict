@@ -856,7 +856,6 @@ async def pixel_bypass_handler(client: Client, message: Message):
     input_text = message.text.split(None, 1)[1]
     
     # Extract all Pixeldrain IDs using Regex
-    # This gracefully handles commas, spaces, or mixed formatting
     matches = re.findall(r"pixeldrain\.com/u/([a-zA-Z0-9_-]+)", input_text)
     
     if not matches:
@@ -865,16 +864,20 @@ async def pixel_bypass_handler(client: Client, message: Message):
             "Please ensure the links follow the format: `https://pixeldrain.com/u/XXXX`"
         )
 
-    # Convert IDs to bypassed links
-    bypassed_links = [f"https://cdn.pixeldrain.eu.cc/{match}" for match in matches]
-    
-    # Join with commas and wrap in backticks for 1-tap copying
-    bypassed_text = ",".join(bypassed_links)
+    # Build the text with Original and Bypassed links, line by line
+    lines = []
+    for match in matches:
+        orig = f"https://pixeldrain.com/u/{match}"
+        byp = f"https://cdn.pixeldrain.eu.cc/{match}"
+        # The backticks ` ` around the bypassed link allow for single-tap copying
+        lines.append(f"🔗 **Original:** {orig}\n🔓 **Bypassed:** `{byp}`\n")
+        
+    bypassed_text = "\n".join(lines)
     
     reply_text = (
         "✨ **Pixeldrain Bypass Successful!** ✨\n\n"
-        "**📥 Bypassed Links (Tap to copy):**\n"
-        f"`{bypassed_text}`\n\n"
+        "**📥 Bypassed Links:**\n\n"
+        f"{bypassed_text}\n"
         "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
         "🌐 **Original Bypass Website:** [Click Here](https://pixeldrain-bypass.gamedrive.org/)\n"
         "📜 **Userscript:** [Install Script](https://pixeldrain-bypass.gamedrive.org/pixeldrain-bypass.user.js)"
