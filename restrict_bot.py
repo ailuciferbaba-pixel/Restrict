@@ -9,6 +9,7 @@ import subprocess
 import gc
 import datetime
 import uuid
+import urllib.parse
 from pathlib import Path
 from collections import defaultdict
 import motor.motor_asyncio
@@ -329,7 +330,6 @@ CANCEL_FLAGS = {}  # task_uuid -> True when cancelled
 
 batch_temp = type("BT", (), {})()
 batch_temp.ACTIVE_TASKS = defaultdict(int)
-# IS_BATCH removed — cancellation is handled per task_uuid via CANCEL_FLAGS
 
 # --- ROBUST CONCURRENCY SETTINGS ---
 # 1. Server Limit: Max 30 uploads total (Protects your server CPU/Bandwidth)
@@ -409,6 +409,114 @@ def sanitize_filename(filename: str) -> str:
     if not ext:
         ext = ".dat"
     return f"{name}{ext}"
+
+# --- 🚀 SMART RENAME FUNCTION 🚀 ---
+def smart_rename(filename, caption_text=""):
+    if not filename: return "Unknown_File.mp4", ""
+    
+    name_raw = urllib.parse.unquote(filename).replace('.', ' ').replace('_', ' ').replace('+', ' ')
+    full_text = f"{name_raw} {caption_text}"
+    
+    year_match = re.search(r'[\(\[](19\d{2}|20\d{2})[\)\]]', full_text)
+    if not year_match:
+        year_match = re.search(r'\b(19\d{2}|20\d{2})\b(?=\s*(1080p|720p|480p|2160p|4k|bluray|webrip|brrip|hdrip|x264|hevc|aac))', full_text, re.I)
+    year = year_match.group(1) if year_match else "Unknown"
+
+    res = "SD"
+    if re.search(r'2160p|4k', full_text, re.I): res = "4K"
+    elif re.search(r'1080p', full_text, re.I): res = "1080p"
+    elif re.search(r'720p', full_text, re.I): res = "720p"
+    elif re.search(r'480p', full_text, re.I): res = "480p"
+
+    codec = "Other"
+    if re.search(r'x265|hevc', full_text, re.I): codec = "HEVC"
+    elif re.search(r'x264|avc', full_text, re.I): codec = "AVC"
+
+    langs_found = []
+    if re.search(r'hindi', full_text, re.I): langs_found.append("Hindi")
+    if re.search(r'tamil', full_text, re.I): langs_found.append("Tamil")
+    if re.search(r'telugu', full_text, re.I): langs_found.append("Telugu")
+    
+    lang = "English" 
+    if re.search(r'multi|dual', full_text, re.I) or len(langs_found) > 1: 
+        lang = "Multi Audio"
+    elif len(langs_found) == 1:
+        lang = langs_found[0]
+
+    junk_patterns = [
+        r'(?:https?:)?//\S+', r'\bwww\.\S+', r'\S*youtube\.com\S*', r'\S*youtu\.be\S*',
+        r'\b[a-zA-Z0-9-]+\.(com|net|org|in|site|cc|tk|ml|me|club|xyz|tv|one|movies|pro)\b(?:\S+)?',
+        r'🎞', r'📸', r'▬', r'🔥', r'👇', r'🔗', r':-', r'==', r'@[a-zA-Z0-9_]+', r'\|', r'~', r'⚡', r'⭐', r'✨', r'▶', r'💖',
+        r'join & share', r'join and share', r'quality movies', 
+        r'join channel', r'subscribe', r'join here', r'downloaded from', r'join now',
+        r'toonworld4all', r'mlwbd', r'vegmovies', r'hdhub4u', r'#Nexleech', r'desicinemas', r'1tamilmv', r'tamilmv', 
+        r'\btelegram\b', r'www\.1TamilMV\.one', r'%[0-9A-Fa-f]{2}', r'%',
+        r'UNRATED', r'UNRATEDXX', r'\[.*?\]'
+    ]
+
+    def clean_title_string(text):
+        if not text: return ""
+        t = urllib.parse.unquote(text)
+        for junk in junk_patterns:
+            t = re.sub(junk, '', t, flags=re.IGNORECASE)
+        t = t.replace('.', ' ').replace('_', ' ').replace('+', ' ')
+        
+        split_regex = r'\(\d{4}\)|\[\d{4}\]|1080p|720p|480p|2160p|4k|bluray|webrip|hdrip|brrip|x264|x265|\|'
+        extracted = re.split(split_regex, t, flags=re.I)[0].strip()
+        
+        if year != "Unknown" and extracted.endswith(year):
+            extracted = extracted[:-4].strip()
+            
+        extracted = re.sub(r'[\(\[].*?[\)\]]', '', extracted)
+        extracted = re.sub(r'\s+', ' ', extracted).strip(' -_')
+        return extracted
+
+    clean_name = "Unknown Title"
+    
+    name_from_file = clean_title_string(filename)
+    is_file_bad = (len(name_from_file) <= 2) or \
+                  bool(re.match(r'^(vid|video|document|file|telegram)_\d+$', name_from_file, re.I)) or \
+                  (name_from_file.lower() in ['mp4', 'mkv', 'avi'])
+
+    if not is_file_bad:
+        clean_name = name_from_file
+    else:
+        pure_title = ""
+        if caption_text:
+            match = re.search(r'(?:Title|Movie|Name)[^\n:]*:\s*([^\n]+)', caption_text, re.IGNORECASE)
+            if match: pure_title = match.group(1).strip()
+                
+        if pure_title:
+            clean_name = clean_title_string(pure_title)
+        elif caption_text:
+            for line in caption_text.split('\n'):
+                potential_name = clean_title_string(line)
+                if len(potential_name) > 2 and potential_name.lower() not in ['mp4', 'mkv', 'avi']:
+                    clean_name = potential_name
+                    break
+                    
+    if not clean_name or clean_name.strip() == "": 
+        clean_name = "Unknown Title"
+
+    base_ext_match = re.search(r'\.(mkv|mp4|avi|webm|zip|rar|pdf)', filename, re.IGNORECASE)
+    base_ext = base_ext_match.group(0) if base_ext_match else ""
+    
+    split_match = re.search(r'\.\d{2,4}$', filename) 
+    split_ext = split_match.group(0) if split_match else ""
+    
+    is_remux = " REMUX" if re.search(r'remux', filename, re.IGNORECASE) else ""
+    
+    parts = [clean_name]
+    if year != "Unknown": parts.append(f"({year})")
+    if lang != "English": parts.append(f"[{lang}]")
+    if res != "SD": parts.append(f"{res}{is_remux}")
+    if codec != "Other": parts.append(codec)
+    
+    perfect_name = " ".join(parts)
+    perfect_filename = perfect_name + base_ext + split_ext
+    
+    return perfect_name, perfect_filename
+# -------------------------------------------
 
 async def check_link_restriction(user_id, link_text):
     """
@@ -1073,7 +1181,6 @@ async def login_handler(bot: Client, message: Message):
         api_id = API_ID
         api_hash = API_HASH
     else:
-        # YouTube Link Removed Here
         api_id_msg = await bot.ask(user_id, "<b>Send Your API ID.</b>", filters=filters.text)
         if api_id_msg.text == '/cancel':
             return await api_id_msg.reply('<b>process cancelled !</b>')
@@ -1936,7 +2043,6 @@ async def start_task_final(client: Client, message_context: Message, task_data: 
     dest = task_data.get("dest_title", "Direct Message")
     
     batch_temp.ACTIVE_TASKS[user_id] += 1
-    # IS_BATCH removed — no longer needed
 
     start_msg = f"✅ **Task Started!**\nDestination: `{dest}`\nSpeed: `{delay}s` delay\nTask ID: `{task_uuid[:8]}`"
     try:
@@ -2289,9 +2395,19 @@ async def handle_private(client: Client, acc, message: Message, chatid, msgid: i
     elif msg_type == "Photo": original_filename = f"{msgid}.jpg"
     elif msg_type == "Voice": original_filename = f"{msgid}.ogg"
 
-    safe_filename = sanitize_filename(original_filename)
+    # 🚀 NEW LOGIC START: Smart Rename System 🚀
+    raw_caption = msg.caption.html if msg.caption else ""
+    perfect_caption, perfect_filename = smart_rename(original_filename, raw_caption)
+    
+    safe_filename = sanitize_filename(perfect_filename)
     if not safe_filename.strip(): safe_filename = f"{msgid}.dat"
     file_path_to_save = task_folder_path / safe_filename
+    
+    # Safely overriding the caption so Pyrogram registers it properly
+    class CleanCaption:
+        html = f"<b>{perfect_caption}</b>"
+    msg.caption = CleanCaption()
+    # 🚀 NEW LOGIC END 🚀
 
     # 3. START DOWNLOAD
     chat_for_status = status_message.chat.id if status_message else message.chat.id
@@ -2812,4 +2928,3 @@ async def main():
         
 if __name__ == "__main__":
     app.run(main())
-        
