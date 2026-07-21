@@ -276,7 +276,7 @@ Even the most advanced systems occasionally face hiccups. If something appears t
 [![Maintenance](https://img.shields.io/badge/Maintained%3F-yes-green.svg?style=for-the-badge)]()
 [![Open Source Love svg1](https://img.shields.io/badge/Open%20Source-%E2%9D%A4%EF%B8%8F-red.svg?style=for-the-badge)]()
 
-**Engineered with precision, immense dedication, and copious amounts of ☕ by a Professional Developer.**
+**Engineered with precision, immense dedication, and copious amounts of ☕ by a Professional Developer. ~Lucifer Morningstar**
 <br>
 *(You are entirely welcome to fork, clone, or deploy this code, but do prepare yourself to be absolutely astonished by its sheer velocity!)* 🚀🔥
 
