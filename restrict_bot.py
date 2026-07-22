@@ -436,12 +436,11 @@ def sanitize_filename(filename: str) -> str:
 def smart_rename(filename, caption_text=""):
     if not filename: return "Unknown_File.mp4", ""
     
-    name_raw = urllib.parse.unquote(filename).replace('.', ' ').replace('_', ' ').replace('+', ' ')
+    name_raw = urllib.parse.unquote(filename).replace('_', ' ').replace('+', ' ')
     full_text = f"{name_raw} {caption_text}"
     
-    year_match = re.search(r'[\(\[](19\d{2}|20\d{2})[\)\]]', full_text)
-    if not year_match:
-        year_match = re.search(r'\b(19\d{2}|20\d{2})\b(?=\s*(1080p|720p|480p|2160p|4k|bluray|webrip|brrip|hdrip|x264|hevc|aac))', full_text, re.I)
+    # 1. Sabse pehle Year, Resolution aur Codec nikal lo
+    year_match = re.search(r'\b(19\d{2}|20\d{2})\b', full_text)
     year = year_match.group(1) if year_match else "Unknown"
 
     res = "SD"
@@ -454,79 +453,94 @@ def smart_rename(filename, caption_text=""):
     if re.search(r'x265|hevc', full_text, re.I): codec = "HEVC"
     elif re.search(r'x264|avc', full_text, re.I): codec = "AVC"
 
+    # Language detect karna
     langs_found = []
-    if re.search(r'hindi', full_text, re.I): langs_found.append("Hindi")
-    if re.search(r'tamil', full_text, re.I): langs_found.append("Tamil")
-    if re.search(r'telugu', full_text, re.I): langs_found.append("Telugu")
+    if re.search(r'\bhindi\b', full_text, re.I): langs_found.append("Hindi")
+    if re.search(r'\btamil\b', full_text, re.I): langs_found.append("Tamil")
+    if re.search(r'\btelugu\b', full_text, re.I): langs_found.append("Telugu")
+    if re.search(r'\bmalayalam\b', full_text, re.I): langs_found.append("Malayalam")
     
     lang = "English" 
-    if re.search(r'multi|dual', full_text, re.I) or len(langs_found) > 1: 
+    if re.search(r'multi|dual|org', full_text, re.I) or len(langs_found) > 1: 
         lang = "Multi Audio"
     elif len(langs_found) == 1:
         lang = langs_found[0]
 
-    junk_patterns = [
-        r'(?:https?:)?//\S+', r'\bwww\.\S+', r'\S*youtube\.com\S*', r'\S*youtu\.be\S*',
-        r'\b[a-zA-Z0-9-]+\.(com|net|org|in|site|cc|tk|ml|me|club|xyz|tv|one|movies|pro)\b(?:\S+)?',
-        r'🎞', r'📸', r'▬', r'🔥', r'👇', r'🔗', r':-', r'==', r'@[a-zA-Z0-9_]+', r'\|', r'~', r'⚡', r'⭐', r'✨', r'▶', r'💖',
-        r'join & share', r'join and share', r'quality movies', 
-        r'join channel', r'subscribe', r'join here', r'downloaded from', r'join now',
-        r'toonworld4all', r'mlwbd', r'vegmovies', r'hdhub4u', r'#Nexleech', r'desicinemas', r'1tamilmv', r'tamilmv', 
-        r'\btelegram\b', r'www\.1TamilMV\.one', r'%[0-9A-Fa-f]{2}', r'%',
-        r'UNRATED', r'UNRATEDXX', r'\[.*?\]'
-    ]
-
+    # 2. 🔥 AGGRESSIVE CLEANING ALGORITHM 🔥
     def clean_title_string(text):
         if not text: return ""
         t = urllib.parse.unquote(text)
-        for junk in junk_patterns:
-            t = re.sub(junk, '', t, flags=re.IGNORECASE)
-        t = t.replace('.', ' ').replace('_', ' ').replace('+', ' ')
         
-        split_regex = r'\(\d{4}\)|\[\d{4}\]|1080p|720p|480p|2160p|4k|bluray|webrip|hdrip|brrip|x264|x265|\|'
-        extracted = re.split(split_regex, t, flags=re.I)[0].strip()
+        # Extension hata do taaki safai me problem na ho
+        t = re.sub(r'\.(mkv|mp4|avi|webm|zip|rar|pdf)$', '', t, flags=re.IGNORECASE)
         
-        if year != "Unknown" and extracted.endswith(year):
-            extracted = extracted[:-4].strip()
-            
-        extracted = re.sub(r'[\(\[].*?[\)\]]', '', extracted)
-        extracted = re.sub(r'\s+', ' ', extracted).strip(' -_')
-        return extracted
+        # URLs aur @mentions ko aggressively remove karo
+        t = re.sub(r'(?:https?:)?//\S+', '', t, flags=re.I)
+        t = re.sub(r'\bwww\.\S+', '', t, flags=re.I)
+        t = re.sub(r'@\S+', '', t) # Yeh saare @usernames uda dega
+        
+        # BRACKETS REMOVAL: Saare [ ] aur { } brackets uda do (Unke andar ke text ke sath)
+        t = re.sub(r'\[.*?\]', '', t)
+        t = re.sub(r'\{.*?\}', '', t)
+        
+        # ( ) brackets ko hatao agar uske andar year na ho
+        t = re.sub(r'\((?!\d{4}\b).*?\)', '', t)
+        
+        # Bacha kucha kachra / promotional words
+        junk_words = [
+            r'join\s*&\s*share', r'join\s*and\s*share', r'join\s*channel', r'join\s*here', r'join\s*now',
+            r'downloaded\s*from', r'subscribe', r'quality\s*movies', r'unrated', r'unratedxx',
+            r'toonworld4all', r'mlwbd', r'vegmovies', r'hdhub4u', r'nexleech', r'desicinemas', r'1tamilmv', r'tamilmv',
+            r'telegram', r'movie', r'movies', r'official'
+        ]
+        for junk in junk_words:
+            t = re.sub(r'\b' + junk + r'\b', '', t, flags=re.IGNORECASE)
+
+        # Emojis aur special symbols
+        t = re.sub(r'[🎞📸▬🔥👇🔗⚡⭐✨▶💖\|~:-]', ' ', t)
+        
+        # Dots, underscores ko spaces me badlo
+        t = t.replace('.', ' ').replace('_', ' ')
+        
+        # Resolution aur Codec file name se hata do (Neeche hum fresh add karenge)
+        t = re.sub(r'\b(1080p|720p|480p|2160p|4k|bluray|webrip|hdrip|brrip|x264|x265|hevc|avc)\b', '', t, flags=re.I)
+        
+        # Year file name se hata do
+        t = re.sub(r'\b(19\d{2}|20\d{2})\b', '', t)
+        
+        # Multiple spaces ko single space banao
+        t = re.sub(r'\s+', ' ', t).strip()
+        
+        return t
 
     clean_name = "Unknown Title"
     
-    name_from_file = clean_title_string(filename)
-    is_file_bad = (len(name_from_file) <= 2) or \
-                  bool(re.match(r'^(vid|video|document|file|telegram)_\d+$', name_from_file, re.I)) or \
-                  (name_from_file.lower() in ['mp4', 'mkv', 'avi'])
-
-    if not is_file_bad:
-        clean_name = name_from_file
+    # Try getting title from caption first
+    pure_title = ""
+    if caption_text:
+        match = re.search(r'(?:Title|Movie|Name)[^\n:]*:\s*([^\n]+)', caption_text, re.IGNORECASE)
+        if match: pure_title = match.group(1).strip()
+        
+    if pure_title:
+        clean_name = clean_title_string(pure_title)
     else:
-        pure_title = ""
-        if caption_text:
-            match = re.search(r'(?:Title|Movie|Name)[^\n:]*:\s*([^\n]+)', caption_text, re.IGNORECASE)
-            if match: pure_title = match.group(1).strip()
-                
-        if pure_title:
-            clean_name = clean_title_string(pure_title)
-        elif caption_text:
-            for line in caption_text.split('\n'):
-                potential_name = clean_title_string(line)
-                if len(potential_name) > 2 and potential_name.lower() not in ['mp4', 'mkv', 'avi']:
-                    clean_name = potential_name
-                    break
-                    
-    if not clean_name or clean_name.strip() == "": 
+        # Fallback to file name
+        clean_name = clean_title_string(filename)
+        
+    if not clean_name or clean_name.strip() == "" or clean_name.lower() in ['mp4', 'mkv', 'avi']: 
         clean_name = "Unknown Title"
 
+    # Title Case me convert karo (e.g. "avengers endgame" -> "Avengers Endgame")
+    clean_name = clean_name.title()
+
+    # 3. Final Name Reconstruct Karna
     base_ext_match = re.search(r'\.(mkv|mp4|avi|webm|zip|rar|pdf)', filename, re.IGNORECASE)
-    base_ext = base_ext_match.group(0) if base_ext_match else ""
+    base_ext = base_ext_match.group(0).lower() if base_ext_match else ".mkv"
     
     split_match = re.search(r'\.\d{2,4}$', filename) 
     split_ext = split_match.group(0) if split_match else ""
     
-    is_remux = " REMUX" if re.search(r'remux', filename, re.IGNORECASE) else ""
+    is_remux = " REMUX" if re.search(r'remux', full_text, re.IGNORECASE) else ""
     
     parts = [clean_name]
     if year != "Unknown": parts.append(f"({year})")
@@ -535,6 +549,11 @@ def smart_rename(filename, caption_text=""):
     if codec != "Other": parts.append(codec)
     
     perfect_name = " ".join(parts)
+    
+    # Extra safety: Agar string me kahin "[]" ya "()" khali reh gaya ho toh delete karo
+    perfect_name = perfect_name.replace('[]', '').replace('()', '').strip()
+    perfect_name = re.sub(r'\s+', ' ', perfect_name)
+    
     perfect_filename = perfect_name + base_ext + split_ext
     
     return perfect_name, perfect_filename
