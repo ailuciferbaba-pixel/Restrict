@@ -432,7 +432,7 @@ def sanitize_filename(filename: str) -> str:
         ext = ".dat"
     return f"{name}{ext}"
 
-# --- 🚀 SMART RENAME FUNCTION 🚀 ---
+# --- 🚀 SMART RENAME FUNCTION (AGGRESSIVE CLEANER) 🚀 ---
 def smart_rename(filename, caption_text=""):
     if not filename: return "Unknown_File.mp4", ""
     
@@ -491,7 +491,7 @@ def smart_rename(filename, caption_text=""):
             r'join\s*&\s*share', r'join\s*and\s*share', r'join\s*channel', r'join\s*here', r'join\s*now',
             r'downloaded\s*from', r'subscribe', r'quality\s*movies', r'unrated', r'unratedxx',
             r'toonworld4all', r'mlwbd', r'vegmovies', r'hdhub4u', r'nexleech', r'desicinemas', r'1tamilmv', r'tamilmv',
-            r'telegram', r'movie', r'movies', r'official'
+            r'telegram', r'movie', r'movies', r'official', r'galaxy_area', r'join'
         ]
         for junk in junk_words:
             t = re.sub(r'\b' + junk + r'\b', '', t, flags=re.IGNORECASE)
@@ -503,7 +503,7 @@ def smart_rename(filename, caption_text=""):
         t = t.replace('.', ' ').replace('_', ' ')
         
         # Resolution aur Codec file name se hata do (Neeche hum fresh add karenge)
-        t = re.sub(r'\b(1080p|720p|480p|2160p|4k|bluray|webrip|hdrip|brrip|x264|x265|hevc|avc)\b', '', t, flags=re.I)
+        t = re.sub(r'\b(1080p|720p|480p|2160p|4k|bluray|webrip|hdrip|brrip|x264|x265|hevc|avc|10bit)\b', '', t, flags=re.I)
         
         # Year file name se hata do
         t = re.sub(r'\b(19\d{2}|20\d{2})\b', '', t)
@@ -2296,7 +2296,9 @@ async def handle_private(client: Client, acc, message: Message, chatid, msgid: i
             if f"{m_id}:up" in PROGRESS: del PROGRESS[f"{m_id}:up"]
     except Exception: pass
 
-    if not is_restricted and not getattr(msg, "has_protected_content", False) and not getattr(msg.chat, "has_protected_content", False):
+    # 🔥 FORCE RENAME MODE 🔥
+    # Fast-Copy is disabled (if False:) so that EVERY file gets downloaded, renamed, and uploaded clean.
+    if False:
         forward_success = False
         for dest in targets:
             dest_chat_id = dest['dest_id']
