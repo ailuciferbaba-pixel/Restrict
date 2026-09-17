@@ -207,9 +207,11 @@ class Database:
         data = await self.db.sync_progress.find_one({"user_id": int(user_id), "source_id": str(source_id), "dest_id": str(dest_id)})
         return data.get("last_msg_id", 0) if data else 0
 
-    async def add_watcher(self, user_id, source_id, dest_id, source_thread=None, dest_thread=None, delay=0, is_restricted=False, source_title=None, dest_title=None, allowed_types=None):
+    async def add_watcher(self, user_id, source_id, dest_id, source_thread=None, dest_thread=None, delay=0, is_restricted=False, source_title=None, dest_title=None, allowed_types=None, text_format=None):
         if allowed_types is None:
             allowed_types = ["Video", "Document"] 
+        if text_format is None:
+            text_format = []
 
         query = {
             'source_id': int(source_id),
@@ -233,10 +235,10 @@ class Database:
             if not target_exists:
                 targets.append(new_target)
                 await self.db.watchers.update_one(query, {
-                    "$set": {"targets": targets, "allowed_types": allowed_types, "delay": int(delay)}
+                    "$set": {"targets": targets, "allowed_types": allowed_types, "delay": int(delay), "text_format": text_format}
                 })
             else:
-                await self.db.watchers.update_one(query, {"$set": {"allowed_types": allowed_types, "delay": int(delay)}})
+                await self.db.watchers.update_one(query, {"$set": {"allowed_types": allowed_types, "delay": int(delay), "text_format": text_format}})
         else:
             watcher = {
                 "user_id": user_id,
@@ -246,6 +248,7 @@ class Database:
                 "is_restricted": is_restricted,
                 "source_title": source_title,
                 "allowed_types": allowed_types,
+                "text_format": text_format,
                 "targets": [new_target],
                 "created_at": datetime.datetime.now()
             }
@@ -467,39 +470,54 @@ def sanitize_filename(filename: str) -> str:
         ext = ".dat"
     return f"{name}{ext}"
 
-# 🚀 BUG FIX: SMART QUALITY TAGGER + UNDERSCORE REMOVER
-def smart_rename(filename, caption_text=""):
-    fname_str = urllib.parse.unquote(str(filename or "Unknown_File.dat")).strip()
-    cap_str = str(caption_text or "").strip()
+# 🚀 SMART CAPTION LOGIC
+def smart_caption(text_html):
+    if not text_html: return ""
     
-    def clean_text(text):
-        text = text.replace('_', ' ')
-        while True:
-            old_text = text
-            text = re.sub(r'^[^a-zA-Z0-9]*(\[.*?\]|\(.*?\))[^a-zA-Z0-9]*', '', text)
-            text = re.sub(r'^[^a-zA-Z0-9]*@[a-zA-Z0-9]+[^a-zA-Z0-9]*', '', text)
-            if old_text == text: break
-        text = re.sub(r'@[a-zA-Z0-9]+\b', '', text)
-        text = re.sub(r'\s+', ' ', text)
-        return text.strip(' -|:')
+    # 1. Replace all underscores with spaces
+    text_html = text_html.replace('_', ' ')
+    
+    # 2. Safely extract trailing extensions (.mkv, .mkv.001) preserving HTML tags
+    ext = ""
+    m_ext = re.search(r'(\.[a-zA-Z0-9]{2,5}(?:\.\d{3,4})?)(\s*(?:</[^>]+>)*\s*)$', text_html)
+    if m_ext:
+        ext = m_ext.group(1)
+        closing_tags = m_ext.group(2)
+        text_html = text_html[:m_ext.start(1)] + closing_tags
         
-    name, ext = os.path.splitext(fname_str)
-    perfect_name = clean_text(name)
+    # 3. Strip starting brackets/tags and starting @usernames recursively
+    while True:
+        old_text = text_html
+        text_html = re.sub(r'^((?:<[^>]+>)*\s*)@[a-zA-Z0-9_]+(\s*)', r'\1', text_html)
+        text_html = re.sub(r'^((?:<[^>]+>)*\s*)(?:\[.*?\]|\(.*?\))(\s*)', r'\1', text_html)
+        if old_text == text_html:
+            break
+            
+    # 4. Remove trailing @username at the very end of the text
+    text_html = re.sub(r'(@[a-zA-Z0-9_]+)(\s*(?:</[^>]+>)*\s*)$', r'\2', text_html)
     
-    if len(perfect_name) < 3: 
-        perfect_name = name.replace('_', ' ')
+    # 5. Add 720p safely if no quality tag exists
+    if not re.search(r'(2160p|1080p|720p|480p|360p|1440p|4k|8k)', text_html, re.IGNORECASE):
+        m_tags = re.search(r'(\s*(?:</[^>]+>)*\s*)$', text_html)
+        if m_tags:
+            text_html = text_html[:m_tags.start()] + " 720p" + m_tags.group(1)
+        else:
+            text_html += " 720p"
 
-    quality_pattern = re.compile(r'(2160p|1080p|720p|480p|360p|1440p|4k|8k)', re.IGNORECASE)
-    if not quality_pattern.search(perfect_name):
-        perfect_name = perfect_name + " 720p"
+    # 6. Re-attach extension
+    m_tags2 = re.search(r'(\s*(?:</[^>]+>)*\s*)$', text_html)
+    if m_tags2:
+        text_html = text_html[:m_tags2.start()] + ext + m_tags2.group(1)
+    else:
+        text_html += ext
         
-    perfect_filename = perfect_name + ext
+    # Clean double spaces
+    text_html = re.sub(r' {2,}', ' ', text_html)
     
-    perfect_caption = clean_text(cap_str)
-    if perfect_caption and not quality_pattern.search(perfect_caption):
-        perfect_caption = perfect_caption + " 720p"
-
-    return perfect_caption, perfect_filename
+    if len(text_html) > 1024:
+        pass
+        
+    return text_html.strip()
 
 async def check_link_restriction(user_id, link_text):
     clean_text = link_text.replace("https://", "").replace("http://", "").replace("t.me/", "").replace("c/", "")
@@ -530,7 +548,7 @@ async def check_link_restriction(user_id, link_text):
     except Exception as e:
         return None, f"⚠️ **Could not analyze link.** Error: {e}"
 
-    is_temp_client = False
+    is_temp_client = app 
     check_client = app 
     
     if is_private:
@@ -633,7 +651,6 @@ def _split_file_smart(file_path, chunk_size):
             part_num += 1
     return parts
 
-# 🚀 BUG FIX: PROGRESS FUNCTION FIXED FOR UI UPDATES
 def progress(current, total, task_uuid, typ):
     if task_uuid and CANCEL_FLAGS.get(task_uuid):
         raise Exception("CANCELLED_BY_USER")
@@ -684,12 +701,12 @@ async def downstatus(client: Client, status_message: Message, chat, index: int, 
         if rec["current"] == rec["total"] and rec["total"] > 0:
             break
             
-        speed = f"{_pretty_bytes(rec.get('speed', 0))}/s"
+        percent = rec.get("percent", 0)
+        speed_str = f"{_pretty_bytes(rec.get('speed', 0))}/s"
         size_str = f"{_pretty_bytes(rec.get('current', 0))} / {_pretty_bytes(rec.get('total', 0))}"
         eta_str = get_readable_time(int(rec.get('eta', 0)) if rec.get('eta') else 0)
-        percent = rec.get("percent", 0)
-        
-        current_action = f"📥 Downloading ({percent:.1f}%)\n║┣⪼🚀 Sᴘᴇᴇᴅ: {speed}\n║┣⪼💾 Sɪᴢᴇ: {size_str}\n║┣⪼⏳ ETA: {eta_str}"
+
+        current_action = f"📥 Downloading ({percent:.1f}%)\n║┣⪼🚀 Sᴘᴇᴇᴅ: {speed_str}\n║┣⪼💾 Sɪᴢᴇ: {size_str}\n║┣⪼⏳ ETA: {eta_str}"
         status_text = generate_aesthetic_progress_ui(task_info, current_action, percent, "DOWNLOADING")
 
         if not task_info.get("confirming_cancel"):
@@ -731,12 +748,12 @@ async def upstatus(client: Client, status_message: Message, chat, index: int, to
         if rec["current"] == rec["total"] and rec["total"] > 0:
             break
             
-        speed = f"{_pretty_bytes(rec.get('speed', 0))}/s"
+        percent = rec.get("percent", 0)
+        speed_str = f"{_pretty_bytes(rec.get('speed', 0))}/s"
         size_str = f"{_pretty_bytes(rec.get('current', 0))} / {_pretty_bytes(rec.get('total', 0))}"
         eta_str = get_readable_time(int(rec.get('eta', 0)) if rec.get('eta') else 0)
-        percent = rec.get("percent", 0)
-        
-        current_action = f"📤 Uploading ({percent:.1f}%)\n║┣⪼🚀 Sᴘᴇᴇᴅ: {speed}\n║┣⪼💾 Sɪᴢᴇ: {size_str}\n║┣⪼⏳ ETA: {eta_str}"
+
+        current_action = f"📤 Uploading ({percent:.1f}%)\n║┣⪼🚀 Sᴘᴇᴇᴅ: {speed_str}\n║┣⪼💾 Sɪᴢᴇ: {size_str}\n║┣⪼⏳ ETA: {eta_str}"
         status_text = generate_aesthetic_progress_ui(task_info, current_action, percent, "UPLOADING")
 
         if not task_info.get("confirming_cancel"):
@@ -1441,6 +1458,12 @@ async def list_watchers(client, message):
         text += f"**{idx}. 📥 {src_display}**\n"
         text += f"   <code>{src_id}</code>\n"
         text += f"   🎛 **Filters:** `{', '.join(w.get('allowed_types', ['Legacy']))}`\n"
+        
+        fmts = w.get('text_format', [])
+        fmt_str = ", ".join(fmts) if fmts else "Default"
+        text += f"   📝 **Format:** `{fmt_str}`\n"
+        text += f"   ⏱ **Delay:** `{w.get('delay', 0)}s`\n"
+        
         text += f"   ⤵️ **Targets ({len(targets)}):**\n"
         
         for t in targets:
@@ -1609,6 +1632,68 @@ async def destination_callback(client: Client, query):
             "⚠️ __Make sure I am an admin in that chat!__",
             reply_markup=InlineKeyboardMarkup(buttons)
         )
+
+# ======================================
+# --- NAYA FORMAT MENU LOGIC START ---
+# ======================================
+def get_format_keyboard(current_formats):
+    buttons = [
+        [
+            InlineKeyboardButton(f"{'✅' if 'Bold' in current_formats else '❌'} Bold", callback_data="format_toggle:Bold"),
+            InlineKeyboardButton(f"{'✅' if 'Italic' in current_formats else '❌'} Italic", callback_data="format_toggle:Italic")
+        ],
+        [InlineKeyboardButton("✅ Default (Keep Original)", callback_data="format_none")],
+        [InlineKeyboardButton("⏭ Next: Select Filters", callback_data="format_start")],
+        [InlineKeyboardButton("🛑 Cancel Setup", callback_data="cancel_setup")]
+    ]
+    return InlineKeyboardMarkup(buttons)
+
+async def show_format_menu(message_or_query, user_id):
+    task_data = PENDING_TASKS.get(user_id)
+    if not task_data: return
+    
+    if "text_format" not in task_data:
+        task_data["text_format"] = [] 
+    task_data["status"] = "waiting_format"
+    
+    kb = get_format_keyboard(task_data["text_format"])
+    text = "📝 **Caption Formatting**\n\nChoose how your caption should look:\n*(Select multiple if you want, or leave Default)*"
+    
+    if isinstance(message_or_query, CallbackQuery):
+        await message_or_query.message.edit_text(text, reply_markup=kb)
+    else:
+        await message_or_query.reply(text, reply_markup=kb, quote=True)
+
+@app.on_callback_query(filters.regex("^format_toggle:(.+)"))
+async def format_toggle_cb(client, query):
+    user_id = query.from_user.id
+    if user_id not in PENDING_TASKS: return await query.answer("Expired.", show_alert=True)
+    fmt = query.data.split(":")[1]
+    current = PENDING_TASKS[user_id].get("text_format", [])
+    if fmt in current: current.remove(fmt)
+    else: current.append(fmt)
+    PENDING_TASKS[user_id]["text_format"] = current
+    try: await query.message.edit_reply_markup(get_format_keyboard(current))
+    except: pass
+    await query.answer()
+
+@app.on_callback_query(filters.regex("^format_none$"))
+async def format_none_cb(client, query):
+    user_id = query.from_user.id
+    if user_id not in PENDING_TASKS: return await query.answer("Expired.", show_alert=True)
+    PENDING_TASKS[user_id]["text_format"] = []
+    try: await query.message.edit_reply_markup(get_format_keyboard([]))
+    except: pass
+    await query.answer()
+
+@app.on_callback_query(filters.regex("^format_start$"))
+async def format_start_cb(client, query):
+    user_id = query.from_user.id
+    if user_id not in PENDING_TASKS: return await query.answer("Expired.", show_alert=True)
+    await show_filter_menu(query, user_id)
+# ======================================
+# --- NAYA FORMAT MENU LOGIC END ---
+# ======================================
 
 def get_filter_keyboard(current_types):
     buttons = []
@@ -1788,7 +1873,7 @@ async def speed_callback(client: Client, query):
 
     if choice == "speed_default":
         PENDING_TASKS[user_id]["delay"] = 0 if task_data.get("mode") == "WATCHER" else 3
-        await show_filter_menu(query, user_id)
+        await show_format_menu(query, user_id)
 
 async def process_speed_input(client: Client, message: Message):
     user_id = message.from_user.id
@@ -1798,7 +1883,7 @@ async def process_speed_input(client: Client, message: Message):
     delay = int(text)
     if user_id in PENDING_TASKS:
         PENDING_TASKS[user_id]["delay"] = delay
-        await show_filter_menu(message, user_id)
+        await show_format_menu(message, user_id)
 
 async def finalize_watcher_setup(client, message, data, delay, user_id=None):
     if user_id is None:
@@ -1829,7 +1914,7 @@ async def finalize_watcher_setup(client, message, data, delay, user_id=None):
                 api_hash=u_hash, 
                 workers=4, 
                 ipv6=False,
-                in_memory=True # Memory Fix
+                in_memory=True 
             )
             new_client.add_handler(MessageHandler(user_watcher_handler))
             
@@ -1891,9 +1976,12 @@ async def finalize_watcher_setup(client, message, data, delay, user_id=None):
         is_restricted=data['is_restricted'],
         source_title=source_title,
         dest_title=data.get('dest_title', str(data.get('dest_chat_id'))),
-        allowed_types=data.get('allowed_types')
+        allowed_types=data.get('allowed_types'),
+        text_format=data.get('text_format')
     )
     
+    fmt_str = ", ".join(data.get('text_format', [])) if data.get('text_format') else "Default"
+
     await message.reply(
         f"✅ **Watcher/Routing Active!**\n\n"
         f"👀 Source: `{source_title}`\n"
@@ -1902,6 +1990,7 @@ async def finalize_watcher_setup(client, message, data, delay, user_id=None):
         f"📂 Dest Topic: `{data.get('dest_thread_id', 'None')}`\n"
         f"⏱ Delay: `{delay}s`\n"
         f"🔒 Restricted Mode: `{'Yes' if data['is_restricted'] else 'No'}`\n"
+        f"📝 Format: `{fmt_str}`\n"
         f"🎛 Filter: `{', '.join(data.get('allowed_types', []))}`"
     )
 
@@ -2023,11 +2112,14 @@ async def start_task_final(client: Client, message_context: Message, task_data: 
             acc_user_id=user_id,
             task_uuid=task_uuid,
             is_restricted=is_restricted,
-            allowed_types=task_data.get('allowed_types')
+            allowed_types=task_data.get('allowed_types'),
+            text_format=task_data.get('text_format', [])
         )
     )   
     
-async def process_links_logic(client: Client, message: Message, text: str, targets=None, dest_title="Direct Message", delay=3, acc_user_id=None, task_uuid=None, is_restricted=False, allowed_types=None):
+async def process_links_logic(client: Client, message: Message, text: str, targets=None, dest_title="Direct Message", delay=3, acc_user_id=None, task_uuid=None, is_restricted=False, allowed_types=None, text_format=None):
+    if text_format is None: text_format = []
+    
     user_id = acc_user_id or (message.from_user.id if message.from_user else 0)
     user_mention = message.from_user.mention if getattr(message, "from_user", None) else f"User({user_id})"
     
@@ -2063,6 +2155,7 @@ async def process_links_logic(client: Client, message: Message, text: str, targe
         filter_thread_id = None 
         start_time = time.time()
         source_title = "Unknown Source"
+        
         total_count = 0
         success_count = 0
         failed_count = 0
@@ -2124,6 +2217,9 @@ async def process_links_logic(client: Client, message: Message, text: str, targe
             else:
                 fromID = toID = int(last_segment)
 
+            if fromID > toID:
+                fromID, toID = toID, fromID
+
             if fromID == toID:
                 try:
                     media_group = await acc.get_media_group(chatid_check, fromID)
@@ -2175,10 +2271,14 @@ async def process_links_logic(client: Client, message: Message, text: str, targe
                 "current_status_text": "Starting Batch..."
             })
 
-            initial_ui = generate_aesthetic_progress_ui(task_info, current_status="Starting Batch...", percent=0.0, footer_status="FORWARDING")
+            status_text_header = f"**Batch Task Started!** 🚀\n"
+            if filter_thread_id:
+                status_text_header += f"**Filter:** `Topic {filter_thread_id} Only` 🎯\n"
+
             cancel_btn = InlineKeyboardMarkup([[InlineKeyboardButton("🛑 Cancel Task", callback_data=f"ask_cancel:{task_uuid}")]])
 
             try:
+                initial_ui = generate_aesthetic_progress_ui(task_info, current_status="Starting Batch...", percent=0.0, footer_status="FORWARDING")
                 status_message = await client.send_message(
                     message.chat.id,
                     initial_ui,
@@ -2214,22 +2314,17 @@ async def process_links_logic(client: Client, message: Message, text: str, targe
                         is_restricted=is_restricted, 
                         header_text=inner_header,
                         filter_thread_id=filter_thread_id,
-                        allowed_types=allowed_types
+                        allowed_types=allowed_types,
+                        text_format=text_format
                     )
                 
                 except FloodWait as e:
-                    if e.value > 300:
-                        print(f"FloodWait too long ({e.value}s). Stopping task.")
-                        try: await client.edit_message_text(task_info.get("status_chat_id"), task_info.get("status_msg_id"), f"❌ **Task Cancelled automatically**\nReason: FloodWait too long ({e.value}s).")
-                        except: pass
-                        was_cancelled = True
-                        break
-
-                    wait_msg = f"⏳ **Rate Limiting Detected**\nSleeping for {e.value} seconds..."
+                    wait_time = e.value + 5
+                    wait_msg = f"⏳ **Rate Limiting Detected**\nSleeping for {wait_time} seconds..."
                     try: 
                         if not is_restricted and not task_info.get("confirming_cancel"): await client.edit_message_text(task_info.get("status_chat_id"), task_info.get("status_msg_id"), wait_msg)
                     except: pass
-                    await asyncio.sleep(e.value + 5)
+                    await asyncio.sleep(wait_time)
                     continue
                     
                 except Exception as e: 
@@ -2245,6 +2340,9 @@ async def process_links_logic(client: Client, message: Message, text: str, targe
                 elif status_reason == "cancelled": was_cancelled = True; break
                 else: task_info["failed"] += 1
 
+                if is_success: success_count += 1
+                else: failed_count += 1
+
                 if index < total_count:
                     if is_success:
                         elapsed_time = time.time() - loop_start_time
@@ -2259,12 +2357,12 @@ async def process_links_logic(client: Client, message: Message, text: str, targe
                 if not was_cancelled and is_success: 
                     await db.save_sync_progress(user_id, chatid_check, primary_dest, msgid)
 
-                current_now = time.time()
                 needs_refresh = task_info.get("needs_refresh", False)
                 force_update = task_info.get("force_update_ui", False)
                 
                 if not task_info.get("confirming_cancel"):
-                    if (task_info["fetched"] % 5 == 0) or (current_now - last_update_time >= STATUS_UPDATE_INTERVAL) or msgid == toID or needs_refresh or force_update:
+                    current_now = time.time()
+                    if (task_info["fetched"] % 20 == 0) or msgid == toID or needs_refresh or force_update:
                         task_info["force_update_ui"] = False
                         percent = (task_info["fetched"] / total_count) * 100.0 if total_count > 0 else 0.0
                         
@@ -2277,10 +2375,10 @@ async def process_links_logic(client: Client, message: Message, text: str, targe
                             
                         fresh_status_ui = generate_aesthetic_progress_ui(
                             task_info, 
-                            current_status="Forwarding", 
+                            current_status=f"Forwarding...\n║┣⪼⏳ ETA: {eta_str}", 
                             percent=percent, 
                             footer_status="FORWARDING"
-                        ) + f"\n\n**⏳ ETA:** {eta_str}"
+                        )
                         
                         try:
                             active_chat = task_info.get("status_chat_id", message.chat.id)
@@ -2366,21 +2464,20 @@ async def process_links_logic(client: Client, message: Message, text: str, targe
                 f"⏱ **Time Taken:** `{time_taken_str}`\n"
                 f"📊 **Statistics:**\n"
                 f"├ 📥 **Total Requested:** `{total_count}`\n"
-                f"├ ✅ **Successful:** `{task_info.get('success', 0)}`\n"
-                f"├ 👥 **Duplicates:** `{task_info.get('duplicate', 0)}`\n"
-                f"├ 🗑 **Deleted:** `{task_info.get('deleted', 0)}`\n"
-                f"├ 🪆 **Skipped:** `{task_info.get('skipped', 0)}`\n"
-                f"├ 🔁 **Filtered:** `{task_info.get('filtered', 0)}`\n"
-                f"└ ❌ **Failed:** `{task_info.get('failed', 0)}`"
+                f"├ ✅ **Successful:** `{success_count}`\n"
+                f"└ ❌ **Failed/Skipped:** `{failed_count}`"
             )
+            
             try: await client.send_message(message.chat.id, final_text, reply_to_message_id=message.id)
             except: pass
 
-async def handle_private(client: Client, acc, message: Message, chatid, msgid: int, index: int, total_count: int, status_message: Message, targets: list, delay, user_id, task_uuid=None, is_restricted=False, header_text="", filter_thread_id=None, allowed_types=None):
-    if not task_uuid: task_uuid = "default"
+async def handle_private(client: Client, acc, message: Message, chatid, msgid: int, index: int, total_count: int, status_message: Message, targets: list, delay, user_id, task_uuid=None, is_restricted=False, header_text="", filter_thread_id=None, allowed_types=None, text_format=None):
+    if not task_uuid:
+        task_uuid = "default"
         
     msg = None
-    try: msg = await acc.get_messages(chatid, msgid)
+    try:
+        msg = await acc.get_messages(chatid, msgid)
     except UserNotParticipant: return False, "failed"
     except Exception: return False, "failed"
 
@@ -2398,47 +2495,103 @@ async def handle_private(client: Client, acc, message: Message, chatid, msgid: i
 
     if task_uuid and CANCEL_FLAGS.get(task_uuid): return False, "cancelled"
 
-    original_filename = "unknown_file"
-    if getattr(msg, "document", None) and getattr(msg.document, "file_name", None): original_filename = msg.document.file_name
-    elif getattr(msg, "video", None) and getattr(msg.video, "file_name", None): original_filename = msg.video.file_name
-    elif getattr(msg, "audio", None) and getattr(msg.audio, "file_name", None): original_filename = msg.audio.file_name
-    elif msg_type == "Photo": original_filename = f"{msgid}.jpg"
-    elif msg_type == "Voice": original_filename = f"{msgid}.ogg"
+    try:
+        if status_message:
+            m_id = status_message.id
+            chat_id = status_message.chat.id
+            if f"{chat_id}:{m_id}:down" in PROGRESS: del PROGRESS[f"{chat_id}:{m_id}:down"]
+            if f"{chat_id}:{m_id}:up" in PROGRESS: del PROGRESS[f"{chat_id}:{m_id}:up"]
+    except Exception: pass
 
-    # 🚀 TEXT MESSAGE BOLD FIX
+    original_caption = ""
+    if msg_type == "Text" and msg.text:
+        original_caption = msg.text.html
+    elif msg.caption:
+        original_caption = msg.caption.html
+    else:
+        if getattr(msg, "document", None) and getattr(msg.document, "file_name", None): original_caption = msg.document.file_name
+        elif getattr(msg, "video", None) and getattr(msg.video, "file_name", None): original_caption = msg.video.file_name
+        elif getattr(msg, "audio", None) and getattr(msg.audio, "file_name", None): original_caption = msg.audio.file_name
+        elif msg_type == "Photo": original_caption = f"{msgid}.jpg"
+        elif msg_type == "Voice": original_caption = f"{msgid}.ogg"
+
+    # 🚀 SAFE SMART CAPTION CLONER (Direct HTML edit, completely safe for formatting)
+    clean_caption = smart_caption(original_caption)
+
+    if text_format:
+        if "Bold" in text_format:
+            clean_caption = f"<b>{clean_caption}</b>"
+        if "Italic" in text_format:
+            clean_caption = f"<i>{clean_caption}</i>"
+
+    # 🚀 EXACT TEXT MESSAGE CLONE WITH NEW CAPTION
     if "Text" == msg_type:
-        raw_text = msg.text if getattr(msg, "text", None) else ""
-        perfect_text, _ = smart_rename("", raw_text)
-        clean_text = f"<b><i>{perfect_text}</i></b>" if perfect_text else ""
         for dest in targets:
-            try: await client.send_message(dest['dest_id'], clean_text, parse_mode=enums.ParseMode.HTML, disable_web_page_preview=True, reply_to_message_id=dest.get('dest_thread'))
-            except: pass
+            try: 
+                await client.send_message(
+                    chat_id=dest['dest_id'], 
+                    text=clean_caption,
+                    reply_markup=msg.reply_markup,
+                    reply_to_message_id=dest.get('dest_thread'),
+                    parse_mode=enums.ParseMode.HTML,
+                    disable_web_page_preview=True
+                )
+            except Exception as e_text:
+                if "TOO_LONG" in str(e_text):
+                    clean_caption = re.sub(r'<[^>]+>', '', clean_caption)[:4000]
+                    try: await client.send_message(chat_id=dest['dest_id'], text=clean_caption, reply_markup=msg.reply_markup, reply_to_message_id=dest.get('dest_thread'), disable_web_page_preview=True)
+                    except: pass
+                else:
+                    try:
+                        await acc.send_message(
+                            chat_id=dest['dest_id'], 
+                            text=clean_caption,
+                            reply_markup=msg.reply_markup,
+                            reply_to_message_id=dest.get('dest_thread'),
+                            parse_mode=enums.ParseMode.HTML,
+                            disable_web_page_preview=True
+                        )
+                    except Exception as e_text2:
+                        if "TOO_LONG" in str(e_text2):
+                            clean_caption = re.sub(r'<[^>]+>', '', clean_caption)[:4000]
+                            try: await acc.send_message(chat_id=dest['dest_id'], text=clean_caption, reply_markup=msg.reply_markup, reply_to_message_id=dest.get('dest_thread'), disable_web_page_preview=True)
+                            except: pass
         return True, "success"
 
-    # 🚀 CAPTION BOLD FIX
-    raw_caption = msg.caption if getattr(msg, "caption", None) else ""
-    perfect_caption, perfect_filename = smart_rename(original_filename, raw_caption)
-    clean_caption = f"<b><i>{perfect_caption}</i></b>" if perfect_caption else ""
-
+    # 🚀 FAST FORWARD EXACT CLONE WITH CAPTION REPLACEMENT
     if not is_restricted and not getattr(msg, "has_protected_content", False) and not getattr(msg.chat, "has_protected_content", False):
         forward_success = False
         for dest in targets:
             dest_chat_id = dest['dest_id']
             dest_thread_id = dest.get('dest_thread')
             try:
-                await client.copy_message(chat_id=dest_chat_id, from_chat_id=chatid, message_id=msgid, reply_to_message_id=dest_thread_id, caption=clean_caption, parse_mode=enums.ParseMode.HTML)
+                await client.copy_message(chat_id=dest_chat_id, from_chat_id=chatid, message_id=msgid, reply_to_message_id=dest_thread_id, caption=clean_caption, parse_mode=enums.ParseMode.HTML, reply_markup=msg.reply_markup)
                 forward_success = True
-            except Exception:
+            except Exception as e1:
+                if "CAPTION_TOO_LONG" in str(e1):
+                    try:
+                        fallback_cap = re.sub(r'<[^>]+>', '', clean_caption)[:1000]
+                        await client.copy_message(chat_id=dest_chat_id, from_chat_id=chatid, message_id=msgid, reply_to_message_id=dest_thread_id, caption=fallback_cap, reply_markup=msg.reply_markup)
+                        forward_success = True
+                        continue
+                    except: pass
                 try:
-                    await acc.copy_message(chat_id=dest_chat_id, from_chat_id=chatid, message_id=msgid, reply_to_message_id=dest_thread_id, caption=clean_caption, parse_mode=enums.ParseMode.HTML)
+                    await acc.copy_message(chat_id=dest_chat_id, from_chat_id=chatid, message_id=msgid, reply_to_message_id=dest_thread_id, caption=clean_caption, parse_mode=enums.ParseMode.HTML, reply_markup=msg.reply_markup)
                     forward_success = True
                 except FloodWait as e:
-                    if e.value > 300: raise e
-                    await asyncio.sleep(e.value + 2)
-                    await acc.copy_message(chat_id=dest_chat_id, from_chat_id=chatid, message_id=msgid, reply_to_message_id=dest_thread_id, caption=clean_caption, parse_mode=enums.ParseMode.HTML)
+                    await asyncio.sleep(e.value + 5)
+                    await acc.copy_message(chat_id=dest_chat_id, from_chat_id=chatid, message_id=msgid, reply_to_message_id=dest_thread_id, caption=clean_caption, parse_mode=enums.ParseMode.HTML, reply_markup=msg.reply_markup)
                     forward_success = True
-                except Exception as e:
-                    print(f"Task Fast-Copy blocked: {e}")
+                except Exception as e2:
+                    if "CAPTION_TOO_LONG" in str(e2):
+                        try:
+                            fallback_cap = re.sub(r'<[^>]+>', '', clean_caption)[:1000]
+                            await acc.copy_message(chat_id=dest_chat_id, from_chat_id=chatid, message_id=msgid, reply_to_message_id=dest_thread_id, caption=fallback_cap, reply_markup=msg.reply_markup)
+                            forward_success = True
+                        except:
+                            print(f"Task Fast-Copy blocked: {e2}")
+                    else:
+                        print(f"Task Fast-Copy blocked: {e2}")
         if forward_success: return True, "success"
 
     # 🌟 DOWNLOAD TOGGLE SAFETY CHECK
@@ -2452,7 +2605,12 @@ async def handle_private(client: Client, acc, message: Message, chatid, msgid: i
     task_folder_path = Path(f"./downloads/{user_id}/{task_uuid}/{msgid}/")
     task_folder_path.mkdir(parents=True, exist_ok=True)
 
-    safe_filename = sanitize_filename(perfect_filename)
+    # 🚀 RETAIN ORIGINAL FILE NAME ON DISK (File name downloading doesn't break formatting)
+    original_filename = "unknown_file"
+    if getattr(msg, "document", None) and getattr(msg.document, "file_name", None): original_filename = msg.document.file_name
+    elif getattr(msg, "video", None) and getattr(msg.video, "file_name", None): original_filename = msg.video.file_name
+    
+    safe_filename = sanitize_filename(original_filename)
     if not safe_filename.strip(): safe_filename = f"{msgid}.dat"
     file_path_to_save = task_folder_path / safe_filename
 
@@ -2491,12 +2649,14 @@ async def handle_private(client: Client, acc, message: Message, chatid, msgid: i
                                     retry_part = 0
                                     while retry_part < 5: 
                                         try:
-                                            await client.send_document(dest_chat_id, str(part), caption=clean_caption, parse_mode=enums.ParseMode.HTML, reply_to_message_id=dest_thread_id, progress=progress, progress_args=[task_uuid, "up"])
+                                            await client.send_document(dest_chat_id, str(part), caption=clean_caption, parse_mode=enums.ParseMode.HTML, reply_markup=msg.reply_markup, reply_to_message_id=dest_thread_id, progress=progress, progress_args=[task_uuid, "up"])
                                             break
                                         except FloodWait as e: 
                                             await asyncio.sleep(e.value + 5)
                                         except Exception as e: 
                                             if "CANCELLED" in str(e): raise e
+                                            if "CAPTION_TOO_LONG" in str(e):
+                                                clean_caption = re.sub(r'<[^>]+>', '', clean_caption)[:1000]
                                             retry_part += 1
                                             await asyncio.sleep(3)
                                 try: os.remove(part)
@@ -2526,7 +2686,6 @@ async def handle_private(client: Client, acc, message: Message, chatid, msgid: i
                 download_success = True
                 break
             except FloodWait as e: 
-                if e.value > 300: raise e
                 await asyncio.sleep(e.value + 5)
             except Exception as e:
                 if "CANCELLED" in str(e): return False, "cancelled"
@@ -2551,19 +2710,22 @@ async def handle_private(client: Client, acc, message: Message, chatid, msgid: i
                     while retry_count < 5: 
                         if task_uuid and CANCEL_FLAGS.get(task_uuid): break
                         try:
-                            if "Document" == msg_type: await uploader.send_document(dest_chat_id, file_path, thumb=ph_path, caption=clean_caption, parse_mode=enums.ParseMode.HTML, reply_to_message_id=dest_thread_id, progress=progress, progress_args=[task_uuid,"up"])
-                            elif "Video" == msg_type: await uploader.send_video(dest_chat_id, file_path, duration=getattr(msg.video, 'duration', 0), width=getattr(msg.video, 'width', 0), height=getattr(msg.video, 'height', 0), thumb=ph_path, caption=clean_caption, parse_mode=enums.ParseMode.HTML, reply_to_message_id=dest_thread_id, progress=progress, progress_args=[task_uuid,"up"])
-                            elif "Audio" == msg_type: await uploader.send_audio(dest_chat_id, file_path, thumb=ph_path, caption=clean_caption, parse_mode=enums.ParseMode.HTML, reply_to_message_id=dest_thread_id, progress=progress, progress_args=[task_uuid,"up"])
-                            elif "Photo" == msg_type: await uploader.send_photo(dest_chat_id, file_path, caption=clean_caption, parse_mode=enums.ParseMode.HTML, reply_to_message_id=dest_thread_id)
-                            elif "Voice" == msg_type: await uploader.send_voice(dest_chat_id, file_path, caption=clean_caption, parse_mode=enums.ParseMode.HTML, reply_to_message_id=dest_thread_id, progress=progress, progress_args=[task_uuid,"up"])
-                            elif "Animation" == msg_type: await uploader.send_animation(dest_chat_id, file_path, caption=clean_caption, parse_mode=enums.ParseMode.HTML, reply_to_message_id=dest_thread_id)
-                            elif "Sticker" == msg_type: await uploader.send_sticker(dest_chat_id, file_path, reply_to_message_id=dest_thread_id)
+                            # 🚀 EXACT UPLOAD CLONE WITH CLEAN CAPTION
+                            if "Document" == msg_type: await uploader.send_document(dest_chat_id, file_path, thumb=ph_path, caption=clean_caption, parse_mode=enums.ParseMode.HTML, reply_markup=msg.reply_markup, reply_to_message_id=dest_thread_id, progress=progress, progress_args=[task_uuid,"up"])
+                            elif "Video" == msg_type: await uploader.send_video(dest_chat_id, file_path, duration=getattr(msg.video, 'duration', 0), width=getattr(msg.video, 'width', 0), height=getattr(msg.video, 'height', 0), thumb=ph_path, caption=clean_caption, parse_mode=enums.ParseMode.HTML, reply_markup=msg.reply_markup, reply_to_message_id=dest_thread_id, progress=progress, progress_args=[task_uuid,"up"])
+                            elif "Audio" == msg_type: await uploader.send_audio(dest_chat_id, file_path, thumb=ph_path, caption=clean_caption, parse_mode=enums.ParseMode.HTML, reply_markup=msg.reply_markup, reply_to_message_id=dest_thread_id, progress=progress, progress_args=[task_uuid,"up"])
+                            elif "Photo" == msg_type: await uploader.send_photo(dest_chat_id, file_path, caption=clean_caption, parse_mode=enums.ParseMode.HTML, reply_markup=msg.reply_markup, reply_to_message_id=dest_thread_id)
+                            elif "Voice" == msg_type: await uploader.send_voice(dest_chat_id, file_path, caption=clean_caption, parse_mode=enums.ParseMode.HTML, reply_markup=msg.reply_markup, reply_to_message_id=dest_thread_id, progress=progress, progress_args=[task_uuid,"up"])
+                            elif "Animation" == msg_type: await uploader.send_animation(dest_chat_id, file_path, caption=clean_caption, parse_mode=enums.ParseMode.HTML, reply_markup=msg.reply_markup, reply_to_message_id=dest_thread_id)
+                            elif "Sticker" == msg_type: await uploader.send_sticker(dest_chat_id, file_path, reply_markup=msg.reply_markup, reply_to_message_id=dest_thread_id)
                             success_local = True
                             break 
                         except FloodWait as e:
                             await asyncio.sleep(e.value + 5)
                         except Exception as e:
                             if "CANCELLED" in str(e): break
+                            if "CAPTION_TOO_LONG" in str(e):
+                                clean_caption = re.sub(r'<[^>]+>', '', clean_caption)[:1000]
                             retry_count += 1
                             await asyncio.sleep(3)
             return success_local
@@ -2636,6 +2798,7 @@ async def process_watcher_message(client, message):
     delay = watcher.get('delay', 0)
     owner_id = watcher['user_id']
     is_restricted = watcher.get('is_restricted', False)
+    text_format = watcher.get('text_format', [])
 
     lock_key = f"watcher_{chat_id}_{owner_id}"
     if lock_key not in WATCHER_LOCKS:
@@ -2653,41 +2816,76 @@ async def process_watcher_message(client, message):
             fallback_to_download = False
             safe_source_id = message.chat.username if message.chat.username else chat_id
             
+            # 🚀 EXACT TEXT WATCHER CLONE WITH CLEAN TEXT
             if msg_type == "Text":
-                raw_text = message.text if getattr(message, "text", None) else ""
-                perfect_text, _ = smart_rename("", raw_text)
-                clean_text = f"<b><i>{perfect_text}</i></b>" if perfect_text else ""
+                original_caption = message.text.html if message.text else ""
+                clean_caption = smart_caption(original_caption)
+                if text_format:
+                    if "Bold" in text_format: clean_caption = f"<b>{clean_caption}</b>"
+                    if "Italic" in text_format: clean_caption = f"<i>{clean_caption}</i>"
                 for t in targets:
-                    try: await app.send_message(t['dest_id'], clean_text, parse_mode=enums.ParseMode.HTML, disable_web_page_preview=True, reply_to_message_id=t.get('dest_thread'))
-                    except: pass
+                    try: 
+                        await client.send_message(
+                            chat_id=t['dest_id'], 
+                            text=clean_caption,
+                            reply_markup=message.reply_markup,
+                            reply_to_message_id=t.get('dest_thread'),
+                            parse_mode=enums.ParseMode.HTML,
+                            disable_web_page_preview=True
+                        )
+                    except Exception as e_text:
+                        if "TOO_LONG" in str(e_text):
+                            clean_caption = re.sub(r'<[^>]+>', '', clean_caption)[:4000]
+                            try: await client.send_message(chat_id=t['dest_id'], text=clean_caption, reply_markup=message.reply_markup, reply_to_message_id=t.get('dest_thread'), disable_web_page_preview=True)
+                            except: pass
                 return
 
-            original_filename = "unknown_file"
-            if getattr(message, "document", None) and getattr(message.document, "file_name", None): original_filename = message.document.file_name
-            elif getattr(message, "video", None) and getattr(message.video, "file_name", None): original_filename = message.video.file_name
-            
-            raw_caption = message.caption if getattr(message, "caption", None) else ""
-            perfect_caption, _ = smart_rename(original_filename, raw_caption)
-            clean_caption = f"<b><i>{perfect_caption}</i></b>" if perfect_caption else ""
+            original_caption = ""
+            if message.caption:
+                original_caption = message.caption.html
+            else:
+                if getattr(message, "document", None) and getattr(message.document, "file_name", None): original_caption = message.document.file_name
+                elif getattr(message, "video", None) and getattr(message.video, "file_name", None): original_caption = message.video.file_name
+                elif getattr(message, "audio", None) and getattr(message.audio, "file_name", None): original_caption = message.audio.file_name
+            clean_caption = smart_caption(original_caption)
+
+            if text_format:
+                if "Bold" in text_format: clean_caption = f"<b>{clean_caption}</b>"
+                if "Italic" in text_format: clean_caption = f"<i>{clean_caption}</i>"
 
             for t in targets:
                 success = False
                 dest_id = t['dest_id']
                 dest_thread = t.get('dest_thread')
                 
+                # 🚀 EXACT MEDIA WATCHER FAST FORWARD CLONE
                 try: 
-                    await app.copy_message(chat_id=dest_id, from_chat_id=safe_source_id, message_id=message.id, reply_to_message_id=dest_thread, caption=clean_caption, parse_mode=enums.ParseMode.HTML)
+                    await app.copy_message(chat_id=dest_id, from_chat_id=safe_source_id, message_id=message.id, reply_to_message_id=dest_thread, caption=clean_caption, parse_mode=enums.ParseMode.HTML, reply_markup=message.reply_markup)
                     success = True
-                except Exception as e1: 
+                except Exception as e1:
+                    if "CAPTION_TOO_LONG" in str(e1):
+                        try:
+                            fallback_cap = re.sub(r'<[^>]+>', '', clean_caption)[:1000]
+                            await app.copy_message(chat_id=dest_id, from_chat_id=safe_source_id, message_id=message.id, reply_to_message_id=dest_thread, caption=fallback_cap, reply_markup=message.reply_markup)
+                            success = True
+                            continue
+                        except: pass
                     try:
                         await client.get_chat(dest_id)
                     except Exception:
                         pass
 
                     try: 
-                        await client.copy_message(chat_id=dest_id, from_chat_id=chat_id, message_id=message.id, reply_to_message_id=dest_thread, caption=clean_caption, parse_mode=enums.ParseMode.HTML)
+                        await client.copy_message(chat_id=dest_id, from_chat_id=chat_id, message_id=message.id, reply_to_message_id=dest_thread, caption=clean_caption, parse_mode=enums.ParseMode.HTML, reply_markup=message.reply_markup)
                         success = True
                     except Exception as e2:
+                        if "CAPTION_TOO_LONG" in str(e2):
+                            try:
+                                fallback_cap = re.sub(r'<[^>]+>', '', clean_caption)[:1000]
+                                await client.copy_message(chat_id=dest_id, from_chat_id=chatid, message_id=message.id, reply_to_message_id=dest_thread, caption=fallback_cap, reply_markup=message.reply_markup)
+                                success = True
+                                continue
+                            except: pass
                         try:
                             await client.forward_messages(chat_id=dest_id, from_chat_id=chat_id, message_ids=message.id, message_thread_id=dest_thread)
                             success = True
@@ -2757,7 +2955,8 @@ async def process_watcher_message(client, message):
                     user_id=owner_id, 
                     task_uuid=task_uuid,
                     is_restricted=True,
-                    allowed_types=allowed_types
+                    allowed_types=allowed_types,
+                    text_format=text_format
                 )
             finally:
                 if task_uuid in ACTIVE_PROCESSES.get(owner_id, {}):
